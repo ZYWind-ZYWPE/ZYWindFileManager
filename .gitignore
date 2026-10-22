@@ -1,0 +1,40 @@
+# ── Visual Studio 生成物（可随时删除，会重新生成）──
+.vs/
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+# ── 编译输出 ──
+bin/
+build/
+check/*.obj
+check/*.exe
+check/*.xml
+check/*.log
+
+# ── 调试符号 ──
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# ── 编译中间产物 / 产物（可由 winico\_trim\mkdll.bat 重新生成）──
+winico/_trim/winico.res
+zywico.dll
+
+# ── 本地 IDE 设置 ──
+*.user
+
+# ── 大体积二进制 / 备份 / 临时素材（不入库）──
+*.7z
+*.zip
+*.bak_*
+src/*.bak_*
+imageres.dll.bak_*
+shell32.dll
+res/imageres.dll
+winico/shell32/
+winico/imageres.dll
+winico/_trim/imageres.dll
+check/仓库信息_已填.png
+.workbuddy/
