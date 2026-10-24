@@ -2283,6 +2283,13 @@ int ZywInputBox(HWND owner, const wchar_t* title, const wchar_t* prompt, std::ws
         WNDCLASSEXW wc = { sizeof(wc) };
         wc.lpfnWndProc   = IbProc;
         wc.hInstance     = g_hInst;
+        wc.hIcon         = (HICON)LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APP),
+                                             IMAGE_ICON, 0, 0, LR_DEFAULTCOLOR);
+        wc.hIconSm       = (HICON)LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APP),
+                                             IMAGE_ICON,
+                                             GetSystemMetrics(SM_CXSMICON),
+                                             GetSystemMetrics(SM_CYSMICON),
+                                             LR_DEFAULTCOLOR);
         wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = NULL;
         wc.lpszClassName = L"ZYWPECore_Input";
@@ -2344,10 +2351,16 @@ static void FmEnsureClass()
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc   = Fm_WndProc;
     wc.hInstance     = g_hInst;
-    /* 本程序不带图标资源：窗口类不设 hIcon / hIconSm，
-     * 窗口样式也没有 WS_EX_APPWINDOW，任务栏本来就不显示它。 */
-    wc.hIcon         = NULL;
-    wc.hIconSm       = NULL;
+    /* ★ 程序图标：res\app.rc 里的 IDI_APP（提取自系统 explorer.exe），
+     *   窗口类设上之后任务栏 / Alt+Tab / 窗口左上角才显示图标，
+     *   资源管理器里 exe 自己也有图标。大图标取 32px 帧、小图标取 16px 帧。 */
+    wc.hIcon         = (HICON)LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APP),
+                                         IMAGE_ICON, 0, 0, LR_DEFAULTCOLOR);
+    wc.hIconSm       = (HICON)LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APP),
+                                         IMAGE_ICON,
+                                         GetSystemMetrics(SM_CXSMICON),
+                                         GetSystemMetrics(SM_CYSMICON),
+                                         LR_DEFAULTCOLOR);
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = NULL;
     wc.lpszClassName = L"ZYWPECore_Files";

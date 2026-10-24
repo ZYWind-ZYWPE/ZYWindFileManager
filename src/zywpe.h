@@ -35,7 +35,11 @@
 
 /* ============================ 产品信息 ============================ */
 #define APP_TITLE       L"竹影清风PE核心"
-#define APP_VERSTR      L"1.0.0.2"
+#define APP_VERSTR      L"1.0.0.3"
+
+/* 程序图标资源 ID（res\app.rc 里 IDI_APP ICON "app.ico"；
+ * app.ico 提取自系统 explorer.exe 的图标组 —— 就是「文件资源管理器」那个图标） */
+#define IDI_APP         1
 
 /* 本程序不带图标资源（exe 无 IDI_ICON1，窗口类也不设 hIcon）。 */
 
