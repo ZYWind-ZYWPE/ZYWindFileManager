@@ -35,7 +35,7 @@
 
 /* ============================ 产品信息 ============================ */
 #define APP_TITLE       L"竹影清风PE核心"
-#define APP_VERSTR      L"1.0.0.1"
+#define APP_VERSTR      L"1.0.0.2"
 
 /* 本程序不带图标资源（exe 无 IDI_ICON1，窗口类也不设 hIcon）。 */
 
