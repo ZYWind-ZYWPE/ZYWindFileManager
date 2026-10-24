@@ -1159,7 +1159,7 @@ static void FmNavigate(FmWin* w, const std::wstring& path, bool pushHist)
         if (w->hist.size() > 64) { w->hist.erase(w->hist.begin()); w->histPos--; }
     }
     w->path = norm;
-    LoadDir(w);
+    LoadDir(w);                      /* LoadDir 内部会把 top 归零，不会残留越界值 */
     FmSyncEdit(w);
     InvalidateRect(w->hwnd, NULL, FALSE);
 }
@@ -1172,10 +1172,28 @@ static void FmGo(FmWin* w, const std::wstring& p)
         return;
     }
     std::wstring path = p;
+    if (path.size() == 2 && path[1] == L':') path.push_back(L'\\');   /* "C:" → "C:\" */
     while (path.size() > 3 && path.back() == L'\\') path.pop_back();
-    if (!FileExistsW(path.c_str())) {
+
+    /* 相对路径按「当前目录」解释（和 Explorer 地址栏一致），例如当前在 D:\Tools
+     * 时输入 PE 就跳到 D:\Tools\PE */
+    bool absolute = (path.size() >= 2 && path[1] == L':') ||
+                    (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\');
+    if (!absolute && !w->path.empty()) path = JoinPath(w->path, path);
+
+    /* ★ BUG-2：原来用 FileExistsW 判断，而它**明确排除目录**
+     *   （util.cpp 里 !(a & FILE_ATTRIBUTE_DIRECTORY)），于是输入 D:\ 或 D:\Tools
+     *   一律被判成「路径不存在」—— 偏偏跳目录才是地址栏最主要的用法。
+     *   这里改用 GetFileAttributesW 自己判：目录→导航，文件→直接运行。 */
+    DWORD attr = GetFileAttributesW(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) {
         MessageBoxW(w->hwnd, (L"\u8DEF\u5F84\u4E0D\u5B58\u5728\uFF1A\n\n" + path).c_str(),
                     APP_TITLE, MB_OK | MB_ICONWARNING);
+        FmSyncEdit(w);
+        return;
+    }
+    if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        RunCommand(L"\"" + path + L"\"");           /* 是文件：交给系统打开 */
         FmSyncEdit(w);
         return;
     }
@@ -1194,7 +1212,7 @@ static void FmRunOnSel(FmWin* w, const wchar_t* verb, const wchar_t* prog)
 {
     int n = 0;
     for (size_t i = 0; i < w->items.size(); i++) {
-        if (!w->sel[i]) continue;
+        if (!w->sel[i] || w->items[i].isDrive) continue;   /* BUG-5：跳过驱动器 */
         n++;
         std::wstring cmd;
         if (prog) cmd = L"\"" + std::wstring(prog) + L"\" \"" + w->items[i].full + L"\"";
@@ -1214,10 +1232,20 @@ static void FmSelectAll(FmWin* w)
 
 static void FmCopyToClip(FmWin* w, bool cut)
 {
+    /* ★ BUG-5：首页「此电脑」的磁贴也是 FmItem，若不按 isDrive 过滤，
+     *   选中 C: 后 Ctrl+C、再到别处 Ctrl+V 就会触发**整个盘**的复制；
+     *   剪切更糟（FO_MOVE 对盘符）。这里直接把驱动器排除掉。 */
     g_clip.clear();
-    for (size_t i = 0; i < w->items.size(); i++)
-        if (w->sel[i]) g_clip.push_back(w->items[i].full);
+    int skipped = 0;
+    for (size_t i = 0; i < w->items.size(); i++) {
+        if (!w->sel[i]) continue;
+        if (w->items[i].isDrive) { skipped++; continue; }
+        g_clip.push_back(w->items[i].full);
+    }
     g_clipCut = cut;
+    if (skipped > 0)
+        MessageBoxW(w->hwnd, L"\u9A71\u52A8\u5668\u4E0D\u80FD\u590D\u5236\u6216\u526A\u5207\uFF0C\u5DF2\u8DF3\u8FC7\u3002",
+                    APP_TITLE, MB_OK | MB_ICONINFORMATION);
     InvalidateRect(w->hwnd, NULL, FALSE);
 }
 
@@ -1265,10 +1293,21 @@ static bool VolumeHasRecycleBin(const std::wstring& path)
 
 static void FmDelete(FmWin* w, bool permanent)
 {
+    /* ★ BUG-5：同上，绝不把驱动器送进 SHFileOperation 的 FO_DELETE ——
+     *   PE 下没有回收站，那是真·整盘删除。 */
     std::vector<std::wstring> sel;
-    for (size_t i = 0; i < w->items.size(); i++)
-        if (w->sel[i]) sel.push_back(w->items[i].full);
-    if (sel.empty()) return;
+    int skipped = 0;
+    for (size_t i = 0; i < w->items.size(); i++) {
+        if (!w->sel[i]) continue;
+        if (w->items[i].isDrive) { skipped++; continue; }
+        sel.push_back(w->items[i].full);
+    }
+    if (sel.empty()) {
+        if (skipped > 0)
+            MessageBoxW(w->hwnd, L"\u9A71\u52A8\u5668\u4E0D\u80FD\u5220\u9664\u3002",
+                        APP_TITLE, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
 
     bool canUndo = !permanent && VolumeHasRecycleBin(sel[0]);
     std::wstring msg = StrFormat(L"\u786E\u5B9A\u5220\u9664\u9009\u4E2D\u7684 %d \u4E2A\u5BF9\u8C61\uFF1F",
@@ -1329,6 +1368,12 @@ static void FmRename(FmWin* w)
     for (size_t i = 0; i < w->items.size(); i++) if (w->sel[i]) { idx = (int)i; break; }
     if (idx < 0) return;
     const FmItem& it = w->items[idx];
+    /* BUG-5：对 C:\ 执行 MoveFileW 会把盘符名改掉，必须挡住 */
+    if (it.isDrive) {
+        MessageBoxW(w->hwnd, L"\u9A71\u52A8\u5668\u4E0D\u80FD\u91CD\u547D\u540D\u3002",
+                    APP_TITLE, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
 
     /* 用一个自绘小输入框取新名称 */
     std::wstring newName = it.name;
@@ -1376,21 +1421,28 @@ enum {
 static void FmContextMenu(FmWin* w, int x, int y)
 {
     bool hasSel = false;
-    for (size_t i = 0; i < w->sel.size(); i++) if (w->sel[i]) hasSel = true;
+    /* hasOp = 选中的**非驱动器**项（BUG-5：复制/剪切/删除/重命名只对这些可用；
+     * 打开和属性对驱动器仍然有效） */
+    bool hasOp  = false;
+    for (size_t i = 0; i < w->sel.size() && i < w->items.size(); i++) {
+        if (!w->sel[i]) continue;
+        hasSel = true;
+        if (!w->items[i].isDrive) hasOp = true;
+    }
 
     HMENU mn = CreatePopupMenu();
     AppendMenuW(mn, MF_STRING | (hasSel ? 0 : MF_GRAYED), CM_OPEN, L"\u6253\u5F00(&O)");
-    AppendMenuW(mn, MF_STRING | (hasSel ? 0 : MF_GRAYED), CM_OPEN_NP,
+    AppendMenuW(mn, MF_STRING | (hasOp  ? 0 : MF_GRAYED), CM_OPEN_NP,
                 L"\u7528\u8BB0\u4E8B\u672C\u6253\u5F00(&N)");
     AppendMenuW(mn, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(mn, MF_STRING | (hasSel ? 0 : MF_GRAYED), CM_COPY, L"\u590D\u5236(&C)");
-    AppendMenuW(mn, MF_STRING | (hasSel ? 0 : MF_GRAYED), CM_CUT,  L"\u526A\u5207(&X)");
+    AppendMenuW(mn, MF_STRING | (hasOp  ? 0 : MF_GRAYED), CM_COPY, L"\u590D\u5236(&C)");
+    AppendMenuW(mn, MF_STRING | (hasOp  ? 0 : MF_GRAYED), CM_CUT,  L"\u526A\u5207(&X)");
     AppendMenuW(mn, MF_STRING | (g_clip.empty() || w->path.empty() ? MF_GRAYED : 0),
                 CM_PASTE, L"\u7C98\u8D34(&V)");
     AppendMenuW(mn, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(mn, MF_STRING | (hasSel ? 0 : MF_GRAYED), CM_REN, L"\u91CD\u547D\u540D(&R)");
-    AppendMenuW(mn, MF_STRING | (hasSel ? 0 : MF_GRAYED), CM_DEL, L"\u5220\u9664(&D)");
-    AppendMenuW(mn, MF_STRING | (hasSel ? 0 : MF_GRAYED), CM_DELPERM, L"\u5F7B\u5E95\u5220\u9664");
+    AppendMenuW(mn, MF_STRING | (hasOp  ? 0 : MF_GRAYED), CM_REN, L"\u91CD\u547D\u540D(&R)");
+    AppendMenuW(mn, MF_STRING | (hasOp  ? 0 : MF_GRAYED), CM_DEL, L"\u5220\u9664(&D)");
+    AppendMenuW(mn, MF_STRING | (hasOp  ? 0 : MF_GRAYED), CM_DELPERM, L"\u5F7B\u5E95\u5220\u9664");
     AppendMenuW(mn, MF_SEPARATOR, 0, NULL);
     AppendMenuW(mn, MF_STRING | (w->path.empty() ? MF_GRAYED : 0), CM_NEWDIR,
                 L"\u65B0\u5EFA\u6587\u4EF6\u5939(&F)");
@@ -1433,6 +1485,30 @@ static void FmLayout(FmWin* w)
 
 /* ============================ 窗口过程 ============================ */
 static FmWin* FmFrom(HWND h) { return (FmWin*)GetWindowLongPtrW(h, GWLP_USERDATA); }
+
+/* ★ BUG-1 修复：地址栏回车。
+ * 单行 EDIT 按回车**不会**给父窗口发 WM_COMMAND（EDIT 的通知码是 0x0100/0x0200/…，
+ * 不存在 0），VK_RETURN 也被 EDIT 自己吃掉 —— 所以原来写在 WM_COMMAND 里
+ * 「HIWORD(wp)==0」的分支是永远不会进的死代码（已用 check\entertest 实测坐实）。
+ * 正确做法：给地址栏做子类化，在子类里直接拦 WM_KEYDOWN + VK_RETURN。 */
+static WNDPROC g_editOldProc = NULL;
+
+static LRESULT CALLBACK FmEditProc(HWND he, UINT m, WPARAM wp, LPARAM lp)
+{
+    FmWin* w = (FmWin*)GetWindowLongPtrW(he, GWLP_USERDATA);
+    if (w && m == WM_KEYDOWN && wp == VK_RETURN) {
+        wchar_t buf[MAX_PATH * 2] = { 0 };
+        GetWindowTextW(he, buf, MAX_PATH * 2);
+        FmGo(w, TrimStr(buf));
+        return 0;
+    }
+    if (w && m == WM_KEYDOWN && wp == VK_ESCAPE) {
+        FmSyncEdit(w);                 /* 放弃编辑，地址栏还原成当前路径 */
+        SetFocus(w->hwnd);
+        return 0;
+    }
+    return CallWindowProcW(g_editOldProc, he, m, wp, lp);
+}
 
 LRESULT CALLBACK Fm_WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
@@ -1523,12 +1599,28 @@ LRESULT CALLBACK Fm_WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 
         w->hEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                    0, 0, 10, 10, h, (HMENU)1001, g_hInst, NULL);
-        if (w->hEdit && g_fontUI) SendMessageW(w->hEdit, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+        if (w->hEdit) {
+            if (g_fontUI) SendMessageW(w->hEdit, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            /* BUG-1：子类化，用于接收回车 / Esc（见 FmEditProc 注释） */
+            SetWindowLongPtrW(w->hEdit, GWLP_USERDATA, (LONG_PTR)w);
+            g_editOldProc = (WNDPROC)SetWindowLongPtrW(w->hEdit, GWLP_WNDPROC,
+                                                       (LONG_PTR)FmEditProc);
+        }
         return 0;
     }
 
     case WM_SIZE:
+        if (!w) break;
         FmLayout(w);
+        /* ★ BUG-4：窗口变小后可视行数变少，但 top 没被夹紧 → 首页所有磁贴的
+         *   「行号 - top」都成负数、详情视图行循环直接不画，右栏一片空白。
+         *   这里在布局后把 top 夹到新的 maxTop。（放大不需要夹，top 本来就合法） */
+        {
+            int n, vis;
+            FmScrollDims(w, n, vis);
+            int maxTop = n - vis; if (maxTop < 0) maxTop = 0;
+            if (w->top > maxTop) w->top = maxTop;
+        }
         InvalidateRect(h, NULL, FALSE);
         return 0;
 
@@ -1554,12 +1646,9 @@ LRESULT CALLBACK Fm_WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     }
 
     case WM_COMMAND:
-        if (LOWORD(wp) == 1001 && HIWORD(wp) == EN_UPDATE) return 0;
-        if (LOWORD(wp) == 1001 && HIWORD(wp) == 0) {   /* 地址栏回车 */
-            wchar_t buf[MAX_PATH * 2] = { 0 };
-            GetWindowTextW(w->hEdit, buf, MAX_PATH * 2);
-            FmGo(w, TrimStr(buf));
-        }
+        /* ★ BUG-1：回车不再走这里（EDIT 从不发 notify=0 的 WM_COMMAND），
+         *   改由 FmEditProc 子类处理；这里只剩「编辑中不要触发别的东西」。 */
+        if (LOWORD(wp) == 1001) return 0;
         return 0;
 
     case WM_KEYDOWN:
@@ -1617,10 +1706,15 @@ LRESULT CALLBACK Fm_WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         int statTop = FmStatusTop(h);
 
         if (w->dragSb) {
-            int n = (int)w->items.size(), vis = FmRowsVisible(h);
+            /* ★ BUG-3：这里原来是详情视图的算法（items.size() / FmRowsVisible /
+             *   FmListTop），首页网格下算出的 maxTop 恒 ≤ 0，滑块根本拖不动。
+             *   现在和 WM_LBUTTONDOWN 里那段统一走 FmScrollDims + sbTop。 */
+            int n, vis;
+            FmScrollDims(w, n, vis);
             int maxTop = n - vis;
-            if (maxTop > 0) {
-                int trackH = statTop - FmListTop();
+            if (maxTop > 0 && vis > 0) {
+                int sbTop = FmPcView(w) ? (FM_TITLE_H + FM_TOOL_H) : FmListTop();
+                int trackH = statTop - sbTop;
                 int thumbH = trackH * vis / n; if (thumbH < S(28)) thumbH = S(28);
                 int span = trackH - thumbH; if (span < 1) span = 1;
                 int d = y - w->dragY0;

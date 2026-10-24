@@ -11,6 +11,7 @@ check/*.obj
 check/*.exe
 check/*.xml
 check/*.log
+check/obj/
 
 # ── 调试符号 ──
 *.pdb
