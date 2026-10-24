@@ -65,10 +65,14 @@
 
 ## 二、两个「PE 特供」的关键设计
 
-### 1. 图标一律自带，不用系统图标
+### 1. 图标自带优先，取不到才问系统的「默认应用关联」
 PE 里的 `imageres.dll` 常被裁到只剩 12 KB —— 空壳、**一个图标资源都没有**。此时 `SHGetFileInfoW` 照样「成功」返回索引，但画出来是全透明的（表现：所有文件都没图标）；而「有的用系统、有的用自带」混用会出现同一屏里有的有图标、有的没有。
 
-所以程序**只用自己的图标库** `zywico.dll`：查找顺序 = 程序同目录 → `%SystemRoot%\System32\zywico.dll` → `%SystemRoot%\System32\imageres.dll`（兜底）。
+所以主路径是**程序自带的图标库** `zywico.dll`：查找顺序 = 程序同目录 → `%SystemRoot%\System32\zywico.dll` → `%SystemRoot%\System32\imageres.dll`（兜底）。
+
+自带库只覆盖 15 类常见文件，剩下的（`.docx` / `.pdf` / `.xlsx` / 无扩展名…）本来都落在同一张「通用文件」图标上。这些类型改为**问系统要「默认应用关联」的图标**（`SHGetFileInfoW`，顺着扩展名找到 Word、Edge、7-Zip…的图标；`exe / lnk / msi` 直接取文件自身内嵌的那张），自带库覆盖到的类型保持原样不动，风格统一。
+
+**防坑**：每次取到系统图标都要先做一次「是不是空图」探测（画到 32bpp DIB 上数非透明像素），空就整条禁用、回退自带图标 —— 所以 PE 里即使 `imageres.dll` 是空壳，也不会退化成「有的有图标有的没有」。首次探测每个尺寸只做一次；图标按「扩展名」（可执行文件按完整路径）缓存，上限 256 条。验证程序：`check\associco.cpp`。
 
 `zywico.dll` 由 `winico\_trim` 下的 ico 编译而成（只保留 ≤48px 帧、同尺寸帧去重，334 KB），**资源 ID = shell32.dll 的图标索引**，当前 15 类映射在 `src\files.cpp` 的 `kKindIconId`：
 

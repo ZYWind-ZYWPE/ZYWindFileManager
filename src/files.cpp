@@ -10,12 +10,15 @@
  *    · 多选（Ctrl / Shift）、滚轮、自绘滚动条
  *    · 右键菜单：打开 / 用记事本打开 / 复制 / 剪切 / 粘贴 / 删除 / 重命名 / 新建文件夹 / 属性
  *    · 快捷键：Enter Backspace Delete F2 F5 Ctrl+A Ctrl+C Ctrl+X Ctrl+V
- *    · 文件图标**一律**取自随程序自带的 zywico.dll（竹影清风图标库，内容来自
+ *    · 文件图标**优先**取自随程序自带的 zywico.dll（竹影清风图标库，内容来自
  *      winico\shell32 的「二创太阳谷」图标，只保留 ≤48px 帧以压缩体积；
- *      资源 ID = shell32.dll 的图标索引，见 kKindIconId 注释），
- *      完全不使用系统图标 —— PE 的系统 imageres.dll 被裁到只剩 12KB（空壳、
- *      没有任何图标资源），系统图像列表里全是空图标，混用会出现
- *      「有的有图标、有的没有」。查找顺序：程序同目录 → System32
+ *      资源 ID = shell32.dll 的图标索引，见 kKindIconId 注释）。查找顺序：
+ *      程序同目录 → System32。自带库覆盖不到的类型（IK_FILE 通用文件、
+ *      以及 exe/lnk/msi 这类「软件」）才去问系统的**默认应用关联**要图标，
+ *      问不到就回退自带图标 —— PE 的系统 imageres.dll 被裁到只剩 12KB
+ *      （空壳、没有任何图标资源），系统图像列表全是空图标，所以每次取到
+ *      系统图标都会先做一次「是不是空图」探测，空就整条禁用，绝不会出现
+ *      「有的有图标、有的没有」。见 AssocIcon() 的注释。
  *    · 首页（此电脑）为 Win10 资源管理器风格的「设备和驱动器」网格视图：
  *      大图标 + 卷标 + 蓝色容量条 + 「xx GB 可用，共 xx GB」
  ******************************************************************************/
@@ -23,6 +26,7 @@
 #include "theme.h"
 #include <shellapi.h>
 #include <algorithm>
+#include <map>
 
 /* ============================ 尺寸 ============================ */
 /* 全部按 96 DPI 的「逻辑像素」书写，S() 换算成当前 DPI 的物理像素。
@@ -263,7 +267,7 @@ static FmIconKind IconKindOf(const std::wstring& name, bool isDir, bool isDrive)
     return IK_FILE;
 }
 
-/* 画一个「种类」图标（来自内置 imageres.dll，不再是自绘图形） */
+/* 画一个「种类」图标（来自内置 zywico.dll，不再是自绘图形） */
 static void DrawIconKind(HDC dc, int x, int y, int sz, FmIconKind k)
 {
     HICON ic = KindIcon(k, sz);
@@ -271,10 +275,111 @@ static void DrawIconKind(HDC dc, int x, int y, int sz, FmIconKind k)
     DrawIconEx(dc, x, y, ic, sz, sz, 0, NULL, DI_NORMAL);
 }
 
-static void DrawTypeIcon(HDC dc, int x, int y, int sz, const std::wstring& name,
-                         bool isDir, bool isDrive)
+/* ==================== 系统「默认应用关联」图标（补空缺用） ====================
+ * 自带 zywico.dll 覆盖了 15 类常见文件，剩下的（.docx / .pdf / .xlsx / 无扩展名…）
+ * 一律落到同一张「通用文件」图标上，看不出差别。这类文件本来就能问系统要：
+ * SHGetFileInfoW 会顺着扩展名找到**默认关联程序**（Word、Edge、7-Zip…）并给出
+ * 它的图标；exe / lnk / msi 甚至能取到文件自身内嵌的那张。
+ *
+ * ★ 老坑必须防：PE 里 imageres.dll 常被裁成 12KB 空壳，这时 SHGetFileInfoW
+ *   照样「成功」返回句柄，但画出来**全透明**（就是当年所有文件都没图标的原因）。
+ *   所以第一次取到系统图标后先做一次像素探测，确认不是空图才启用这条路径；
+ *   一旦判定不可用就整条禁用，继续用自带图标 —— 绝不会出现
+ *   「同一屏里有的有图标、有的没有」。自带库覆盖到的类型也不抢，风格保持一致。 */
+
+static bool                        g_assocProbed = false;
+static bool                        g_assocUsable = false;
+static std::map<std::wstring, HICON> g_assocSmall;   /* 16~24px 那档 */
+static std::map<std::wstring, HICON> g_assocLarge;   /* 32px 及以上   */
+
+/* 图标是不是「空的」（全透明）—— PE 空壳 imageres.dll 的典型症状 */
+static bool IconHasPixels(HICON ic, int sz)
 {
-    DrawIconKind(dc, x, y, sz, IconKindOf(name, isDir, isDrive));
+    if (!ic) return false;
+    HDC dc = CreateCompatibleDC(NULL);
+    if (!dc) return false;
+    BITMAPINFO bi = { 0 };
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = sz;
+    bi.bmiHeader.biHeight      = -sz;               /* top-down，扫描顺序直观 */
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = NULL;
+    HBITMAP dib = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!dib || !bits) { DeleteDC(dc); return false; }
+    HGDIOBJ old = SelectObject(dc, dib);
+    memset(bits, 0, (size_t)sz * sz * 4);
+    DrawIconEx(dc, 0, 0, ic, sz, sz, 0, NULL, DI_NORMAL);
+    SelectObject(dc, old);
+    const unsigned char* p = (const unsigned char*)bits;
+    bool any = false;
+    for (int i = 3; i < sz * sz * 4; i += 4) if (p[i] != 0) { any = true; break; }
+    DeleteObject(dib);
+    DeleteDC(dc);
+    return any;
+}
+
+/* fromFile=true 时不加 SHGFI_USEFILEATTRIBUTES：会真的去读文件里的图标资源
+ * （exe / lnk / msi 自己的那张），慢一点但准确；false 只看扩展名，很快。 */
+static HICON ShellAssocIcon(const wchar_t* path, DWORD attr, int sz, bool fromFile)
+{
+    SHFILEINFOW sfi = { 0 };
+    UINT fl = SHGFI_ICON | (sz <= 24 ? SHGFI_SMALLICON : SHGFI_LARGEICON);
+    if (!fromFile) fl |= SHGFI_USEFILEATTRIBUTES;
+    if (!SHGetFileInfoW(path, attr, &sfi, sizeof(sfi), fl)) return NULL;
+    return sfi.hIcon;
+}
+
+static HICON AssocIcon(const FmItem& it, int sz)
+{
+    if (!g_assocProbed) {                 /* 只探测一次：系统图标到底能不能用 */
+        g_assocProbed = true;
+        HICON t = ShellAssocIcon(L"probe.txt", FILE_ATTRIBUTE_NORMAL, sz, false);
+        g_assocUsable = IconHasPixels(t, sz);
+        if (t) DestroyIcon(t);
+    }
+    if (!g_assocUsable) return NULL;
+
+    /* 缓存键：可执行类按完整路径（每个文件的图标都不同），其余按扩展名 */
+    std::wstring ext;
+    size_t d = it.name.rfind(L'.');
+    if (d != std::wstring::npos && d + 1 < it.name.size()) ext = it.name.substr(d + 1);
+    ToLowerW(ext);
+    bool exec = (ext == L"exe" || ext == L"lnk" || ext == L"scr" ||
+                 ext == L"msi" || ext == L"com");
+    std::wstring key = exec ? it.full : (L"*." + ext);
+
+    std::map<std::wstring, HICON>& cache = (sz <= 24) ? g_assocSmall : g_assocLarge;
+    std::map<std::wstring, HICON>::iterator f = cache.find(key);
+    if (f != cache.end()) return f->second;        /* 拿不到也记着，避免每帧重试 */
+    if (cache.size() > 256) {                      /* 简单上限：超了整表重建 */
+        for (f = cache.begin(); f != cache.end(); ++f) if (f->second) DestroyIcon(f->second);
+        cache.clear();
+    }
+    HICON ic = ShellAssocIcon(it.full.c_str(), it.attr, sz, exec);
+    if (ic && !IconHasPixels(ic, sz)) { DestroyIcon(ic); ic = NULL; }
+    cache[key] = ic;
+    return ic;
+}
+
+/* 条目最终用的图标：自带库没覆盖到的类型（含 exe 自身图标）先问系统关联，
+ * 问不到再回退自带 zywico 图标 */
+static HICON ItemIcon(const FmItem& it, int sz)
+{
+    FmIconKind k = IconKindOf(it.name, it.isDir, it.isDrive);
+    if (!it.isDir && !it.isDrive && (k == IK_FILE || k == IK_EXE)) {
+        HICON a = AssocIcon(it, sz);
+        if (a) return a;
+    }
+    return KindIcon(k, sz);
+}
+
+static void DrawItemIcon(HDC dc, int x, int y, int sz, const FmItem& it)
+{
+    HICON ic = ItemIcon(it, sz);
+    if (!ic) return;
+    DrawIconEx(dc, x, y, ic, sz, sz, 0, NULL, DI_NORMAL);
 }
 
 /* 驱动器按类型选图标（硬盘 / U盘 / 光盘），与系统资源管理器一致 */
@@ -1049,8 +1154,8 @@ static void FmPaint(FmWin* w, HDC hdc)
         }
         const FmItem& it = w->items[i];
         /* ★ 图标按实际边长居中（不是写死的 16），才能和文字对齐。
-         *   来源只有一个：自带的 imageres.dll。 */
-        DrawTypeIcon(mem, RowIconX(), RowIconY(y), icSz, it.name, it.isDir, it.isDrive);
+         *   来源：自带 zywico.dll；自带库没覆盖的类型再去问系统的默认应用关联。 */
+        DrawItemIcon(mem, RowIconX(), RowIconY(y), icSz, it);
 
         COLORREF tc = (it.attr & FILE_ATTRIBUTE_HIDDEN) ? T_FAINT : T_TEXT;
         RECT rn = { RowTextX(icSz), y, cSize - S(6), y + FM_ROW_H };
