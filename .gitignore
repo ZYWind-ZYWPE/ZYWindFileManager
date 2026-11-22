@@ -7,11 +7,8 @@
 # ── 编译输出 ──
 bin/
 build/
-check/*.obj
-check/*.exe
-check/*.xml
-check/*.log
-check/obj/
+# ── 本地检查/验证（不进仓库）──
+check/
 
 # ── 调试符号 ──
 *.pdb

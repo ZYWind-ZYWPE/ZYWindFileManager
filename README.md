@@ -72,7 +72,7 @@ PE 里的 `imageres.dll` 常被裁到只剩 12 KB —— 空壳、**一个图标
 
 自带库只覆盖 15 类常见文件，剩下的（`.docx` / `.pdf` / `.xlsx` / 无扩展名…）本来都落在同一张「通用文件」图标上。这些类型改为**问系统要「默认应用关联」的图标**（`SHGetFileInfoW`，顺着扩展名找到 Word、Edge、7-Zip…的图标；`exe / lnk / msi` 直接取文件自身内嵌的那张），自带库覆盖到的类型保持原样不动，风格统一。
 
-**防坑**：每次取到系统图标都要先做一次「是不是空图」探测（画到 32bpp DIB 上数非透明像素），空就整条禁用、回退自带图标 —— 所以 PE 里即使 `imageres.dll` 是空壳，也不会退化成「有的有图标有的没有」。首次探测每个尺寸只做一次；图标按「扩展名」（可执行文件按完整路径）缓存，上限 256 条。验证程序：`check\associco.cpp`。
+**防坑**：每次取到系统图标都要先做一次「是不是空图」探测（画到 32bpp DIB 上数非透明像素），空就整条禁用、回退自带图标 —— 所以 PE 里即使 `imageres.dll` 是空壳，也不会退化成「有的有图标有的没有」。首次探测每个尺寸只做一次；图标按「扩展名」（可执行文件按完整路径）缓存，上限 256 条。
 
 `zywico.dll` 由 `winico\_trim` 下的 ico 编译而成（只保留 ≤48px 帧、同尺寸帧去重，334 KB），**资源 ID = shell32.dll 的图标索引**，当前 15 类映射在 `src\files.cpp` 的 `kKindIconId`：
 
@@ -112,7 +112,6 @@ res\
 winico\
   _trim\        图标库原料：精简后的 ico + winico.rc + mkdll.bat
   图标对照.html 15 类图标的对照预览页
-check\          静态检查脚本与报告（含一份未修问题清单）
 ```
 
 ---
@@ -173,17 +172,17 @@ link /nologo /DLL /NOENTRY /MACHINE:X64 /OUT:..\..\zywico.dll winico.res
 
 ## 六、已知问题 → 已修复（2026-10-24）
 
-`check\静态检查报告.md` 里那份 `/W4 /analyze` 静态检查列了 5 条确认存在的问题，**现已全部修复**：
+`/W4 /analyze` 全量静态检查曾列出 5 条确认存在的问题，**现已全部修复**：
 
 | # | 问题 | 修法 |
 |---|---|---|
-| 1 | 地址栏回车无效 | `WM_COMMAND` 的 `HIWORD(wp)==0` 是死分支（单行 EDIT 从不发它）。改为**子类化地址栏**（`FmEditProc`），在子类里拦 `WM_KEYDOWN + VK_RETURN` 调 `FmGo`；`check\editsub.cpp` 实测拦截成功 |
+| 1 | 地址栏回车无效 | `WM_COMMAND` 的 `HIWORD(wp)==0` 是死分支（单行 EDIT 从不发它）。改为**子类化地址栏**（`FmEditProc`），在子类里拦 `WM_KEYDOWN + VK_RETURN` 调 `FmGo` |
 | 2 | 输入目录路径被判"不存在" | `FmGo` 改用 `GetFileAttributesW` 自判：目录→导航，文件→交给 Shell 打开；并支持相对当前目录的路径、`C:` 自动补 `\` |
 | 3 | 首页滚动条拖不动 | `WM_MOUSEMOVE` 拖拽分支改走 `FmScrollDims` + `sbTop`，与 `WM_LBUTTONDOWN` 一致 |
 | 4 | `WM_SIZE` 后 `top` 越界导致空白 | `WM_SIZE` 里按新的 `n/vis` 夹紧 `w->top` |
 | 5 | 首页可对驱动器删除 / 复制 / 剪切 | `FmCopyToClip` / `FmDelete` / `FmRename` / `FmRunOnSel` 全部按 `isDrive` 过滤；右键菜单对驱动器把 复制/剪切/删除/重命名 置灰，只留 打开 / 属性 |
 
-余下的都是无功能影响的编译告警（未用参数、变量遮蔽、死函数 `FmToolY`、BOM 常量强转），详见报告第三节。
+余下的都是无功能影响的编译告警（未用参数、变量遮蔽、死函数 `FmToolY`、BOM 常量强转）。
 
 ---
 
