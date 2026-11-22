@@ -1429,18 +1429,27 @@ static void FmDelete(FmWin* w, bool permanent)
     InvalidateRect(w->hwnd, NULL, FALSE);
 }
 
-static void FmNewFolder(FmWin* w)
+/* 「新建」：makeDir = true 建文件夹，false 建空文本文档。
+ * 默认名「新建文件夹」/「新建文本文档.txt」，重名自动加 (2)(3)… 序号。 */
+static void FmCreateNew(FmWin* w, bool makeDir)
 {
     if (w->path.empty()) return;
 
-    /* 弹出自绘输入框命名（默认「新建文件夹」，重名自动加序号） */
-    std::wstring name = L"\u65B0\u5EFA\u6587\u4EF6\u5939";
+    const wchar_t* defName = makeDir ? L"\u65B0\u5EFA\u6587\u4EF6\u5939"       /* 新建文件夹 */
+                                     : L"\u65B0\u5EFA\u6587\u672C\u6587\u6863.txt"; /* 新建文本文档.txt */
+    const wchar_t* stem    = makeDir ? L"\u65B0\u5EFA\u6587\u4EF6\u5939"
+                                     : L"\u65B0\u5EFA\u6587\u672C\u6587\u6863";
+    const wchar_t* title   = makeDir ? L"\u65B0\u5EFA\u6587\u4EF6\u5939"
+                                     : L"\u65B0\u5EFA\u6587\u672C\u6587\u6863";
+    const wchar_t* prompt  = makeDir ? L"\u8BF7\u8F93\u5165\u65B0\u6587\u4EF6\u5939\u540D\u79F0\uFF1A"
+                                     : L"\u8BF7\u8F93\u5165\u65B0\u6587\u4EF6\u540D\u79F0\uFF1A";
+
+    std::wstring name = defName;
     for (int k = 2; k < 1000; k++) {
         if (!FileExistsW(JoinPath(w->path, name).c_str())) break;
-        name = StrFormat(L"\u65B0\u5EFA\u6587\u4EF6\u5939 (%d)", k);
+        name = StrFormat(makeDir ? L"%s (%d)" : L"%s (%d).txt", stem, k);
     }
-    if (ZywInputBox(w->hwnd, L"\u65B0\u5EFA\u6587\u4EF6\u5939",
-                    L"\u8BF7\u8F93\u5165\u65B0\u6587\u4EF6\u5939\u540D\u79F0\uFF1A", name) != 0)
+    if (ZywInputBox(w->hwnd, title, prompt, name) != 0)
         return;
     name = TrimStr(name);
     if (name.empty()) return;
@@ -1450,12 +1459,26 @@ static void FmNewFolder(FmWin* w)
             name[i] == L'*' || name[i] == L'?' || name[i] == L'"' ||
             name[i] == L'<' || name[i] == L'>' || name[i] == L'|') name[i] = L'_';
     if (name.empty()) return;
+    /* 文本文档没有扩展名时补 .txt（文件夹不补） */
+    if (!makeDir && name.find_last_of(L'.') == std::wstring::npos)
+        name += L".txt";
 
     std::wstring full = JoinPath(w->path, name);
-    if (!CreateDirectoryW(full.c_str(), NULL)) {
-        MessageBoxW(w->hwnd, (L"\u65E0\u6CD5\u521B\u5EFA\uFF1A\n" + full).c_str(),
-                    APP_TITLE, MB_OK | MB_ICONWARNING);
-        return;
+    if (makeDir) {
+        if (!CreateDirectoryW(full.c_str(), NULL)) {
+            MessageBoxW(w->hwnd, (L"\u65E0\u6CD5\u521B\u5EFA\uFF1A\n" + full).c_str(),
+                        APP_TITLE, MB_OK | MB_ICONWARNING);
+            return;
+        }
+    } else {
+        HANDLE hf = CreateFileW(full.c_str(), GENERIC_WRITE, 0, NULL,
+                                CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hf == INVALID_HANDLE_VALUE) {
+            MessageBoxW(w->hwnd, (L"\u65E0\u6CD5\u521B\u5EFA\uFF1A\n" + full).c_str(),
+                        APP_TITLE, MB_OK | MB_ICONWARNING);
+            return;
+        }
+        CloseHandle(hf);
     }
     LoadDir(w);
     for (size_t i = 0; i < w->items.size(); i++)
@@ -1463,6 +1486,7 @@ static void FmNewFolder(FmWin* w)
             for (size_t j = 0; j < w->sel.size(); j++) w->sel[j] = 0;
             w->sel[i] = 1;
             w->anchor = (int)i;
+            FmEnsureVisible(w, (int)i);
         }
     InvalidateRect(w->hwnd, NULL, FALSE);
 }
@@ -1520,7 +1544,7 @@ static void FmProperties(FmWin* w)
 /* ============================ 右键菜单 ============================ */
 enum {
     CM_OPEN = 1, CM_OPEN_NP, CM_COPY, CM_CUT, CM_PASTE, CM_DEL, CM_REN,
-    CM_NEWDIR, CM_PROP, CM_REFRESH, CM_SELALL, CM_DELPERM
+    CM_NEWDIR, CM_NEWTXT, CM_PROP, CM_REFRESH, CM_SELALL, CM_DELPERM
 };
 
 static void FmContextMenu(FmWin* w, int x, int y)
@@ -1549,8 +1573,13 @@ static void FmContextMenu(FmWin* w, int x, int y)
     AppendMenuW(mn, MF_STRING | (hasOp  ? 0 : MF_GRAYED), CM_DEL, L"\u5220\u9664(&D)");
     AppendMenuW(mn, MF_STRING | (hasOp  ? 0 : MF_GRAYED), CM_DELPERM, L"\u5F7B\u5E95\u5220\u9664");
     AppendMenuW(mn, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(mn, MF_STRING | (w->path.empty() ? MF_GRAYED : 0), CM_NEWDIR,
-                L"\u65B0\u5EFA\u6587\u4EF6\u5939(&F)");
+    /* 「新建」组合框（仿资源管理器的级联子菜单）：首页「此电脑」不显示 */
+    if (!w->path.empty()) {
+        HMENU mNew = CreatePopupMenu();
+        AppendMenuW(mNew, MF_STRING, CM_NEWDIR, L"\u65B0\u5EFA\u6587\u4EF6\u5939(&F)");
+        AppendMenuW(mNew, MF_STRING, CM_NEWTXT, L"\u65B0\u5EFA\u6587\u672C\u6587\u6863(&T)");
+        AppendMenuW(mn, MF_POPUP, (UINT_PTR)mNew, L"\u65B0\u5EFA(&W)");
+    }
     AppendMenuW(mn, MF_STRING, CM_REFRESH, L"\u5237\u65B0(&E)");
     AppendMenuW(mn, MF_STRING, CM_SELALL, L"\u5168\u9009(&A)");
     AppendMenuW(mn, MF_SEPARATOR, 0, NULL);
@@ -1571,7 +1600,8 @@ static void FmContextMenu(FmWin* w, int x, int y)
     case CM_DEL:     FmDelete(w, false); break;
     case CM_DELPERM: FmDelete(w, true);  break;
     case CM_REN:     FmRename(w); break;
-    case CM_NEWDIR:  FmNewFolder(w); break;
+    case CM_NEWDIR:  FmCreateNew(w, true);  break;
+    case CM_NEWTXT:  FmCreateNew(w, false); break;
     case CM_PROP:    FmProperties(w); break;
     case CM_REFRESH: LoadDir(w); InvalidateRect(w->hwnd, NULL, FALSE); break;
     case CM_SELALL:  FmSelectAll(w); break;
@@ -1930,7 +1960,7 @@ LRESULT CALLBACK Fm_WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
                     InvalidateRect(h, NULL, FALSE);
                     break;
                 case FB_NEWDIR:
-                    if (!w->path.empty()) FmNewFolder(w);
+                    if (!w->path.empty()) FmCreateNew(w, true);
                     break;
                 }
                 return 0;
